@@ -1,3 +1,27 @@
-from artarb.models.artwork import Artwork
+from artarb.models.base import (
+    Artist,
+    Exhibition,
+    Listing,
+    Lot,
+    MarketEvent,
+    Opportunity,
+    Portfolio,
+    PriceEvent,
+    RegionalPriceIndex,
+    ScrapeLog,
+    SearchTrend,
+)
 
-__all__ = ["Artwork"]
+__all__ = [
+    "Artist",
+    "Exhibition",
+    "Listing",
+    "Lot",
+    "MarketEvent",
+    "Opportunity",
+    "Portfolio",
+    "PriceEvent",
+    "RegionalPriceIndex",
+    "ScrapeLog",
+    "SearchTrend",
+]
