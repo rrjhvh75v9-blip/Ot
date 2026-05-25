@@ -7,3 +7,4 @@ playwright>=1.40
 python-dotenv>=1.0
 pandas>=2.1
 schedule>=1.2
+rapidfuzz>=3.0
