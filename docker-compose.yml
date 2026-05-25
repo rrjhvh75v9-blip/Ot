@@ -1,0 +1,56 @@
+services:
+
+  # ── PostgreSQL 15 ─────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-artarb}
+      POSTGRES_USER:     ${DB_USER:-artarb}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-artarb} -d ${DB_NAME:-artarb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # Expose port only for local DB clients (psql, DBeaver, etc.).
+    # Remove this block if you don't need direct access.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  # ── artarb application ────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-artarb}:${DB_PASSWORD}@db:5432/${DB_NAME:-artarb}
+      DB_POOL_SIZE:      ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW:   ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT:   ${DB_POOL_TIMEOUT:-30}
+      DB_POOL_RECYCLE:   ${DB_POOL_RECYCLE:-1800}
+      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
+      # Override the unmatched-name log path to the volume mount below
+      ARTARB_UNMATCHED_LOG: /app/logs/unmatched_artists.log
+    volumes:
+      # Persistent log files (unmatched artist names, etc.)
+      - app_logs:/app/logs
+    # Uncomment to stream logs with a timestamp prefix via Docker:
+    # logging:
+    #   driver: "json-file"
+    #   options:
+    #     max-size: "50m"
+    #     max-file: "5"
+
+volumes:
+  pgdata:
+    driver: local
+  app_logs:
+    driver: local

@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+
+# Python caches
+__pycache__
+*.py[cod]
+*.pyo
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# Local environment
+.env
+*.env.local
+
+# Test artefacts
+htmlcov
+.coverage
+coverage.xml
+
+# Local logs
+unmatched_artists.log
+logs/
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode
+.idea
