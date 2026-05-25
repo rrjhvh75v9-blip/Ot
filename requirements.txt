@@ -1,0 +1,9 @@
+sqlalchemy>=2.0
+alembic>=1.13
+psycopg2-binary>=2.9
+requests>=2.31
+beautifulsoup4>=4.12
+playwright>=1.40
+python-dotenv>=1.0
+pandas>=2.1
+schedule>=1.2
