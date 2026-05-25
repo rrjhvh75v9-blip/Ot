@@ -8,4 +8,5 @@ python-dotenv>=1.0
 pandas>=2.1
 schedule>=1.2
 rapidfuzz>=3.0
+pytrends>=4.9
 pytest>=8.0
