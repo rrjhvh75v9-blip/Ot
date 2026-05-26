@@ -392,8 +392,12 @@ def _upsert_opportunity(
 # ---------------------------------------------------------------------------
 
 def _effective_bid(listing: Listing) -> Optional[float]:
-    """Return current_bid if available, else opening_bid, else None."""
-    if listing.current_bid is not None:
+    """Return current_bid if positive, else opening_bid, else None.
+
+    A current_bid of 0 means no bids have been placed yet; fall through
+    to opening_bid so the financial model uses a real reserve price.
+    """
+    if listing.current_bid is not None and float(listing.current_bid) > 0:
         return float(listing.current_bid)
     if listing.opening_bid is not None:
         return float(listing.opening_bid)
