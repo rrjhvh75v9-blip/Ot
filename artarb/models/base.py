@@ -24,6 +24,8 @@ class Artist(Base):
     died: Mapped[Optional[int]] = mapped_column(SmallInteger)
     movement: Mapped[Optional[str]] = mapped_column(String(200))
     market_tier: Mapped[Optional[str]] = mapped_column(String(50))
+    specialty_category: Mapped[Optional[str]] = mapped_column(String(50))
+    arbitrage_notes: Mapped[Optional[str]] = mapped_column(Text)
 
     lots: Mapped[list["Lot"]] = relationship(back_populates="artist")
     search_trends: Mapped[list["SearchTrend"]] = relationship(back_populates="artist")
