@@ -2,7 +2,7 @@
 """
 Art Arbitrage Terminal Dashboard.
 
-Two sections:
+Three sections:
 
   SPECIALTY OPPORTUNITIES   — open opportunities flagged by the specialty scorer,
                               grouped by niche with colour-coded urgency.
@@ -10,6 +10,9 @@ Two sections:
   KEYWORD ALERTS            — lots whose titles matched a watchlist keyword but
   NEEDS REVIEW                whose artist is not yet in the database.  Grouped
                               by trigger keyword for efficient batch review.
+
+  SCRAPE HEALTH             — last-run time, status, items found, and any errors
+                              for each of the 18 auction house scrapers.
 
 Usage
 -----
@@ -56,6 +59,13 @@ CATEGORY_STYLES: dict[str, str] = {
 
 CATEGORY_ORDER = list(CATEGORY_LABELS.keys())
 
+ALL_PLATFORMS = [
+    "kunstveiling", "catawiki", "barnebys", "venduehuis", "bernaerts",
+    "vavato", "bassenge", "van_ham", "arenberg", "piasa",
+    "lempertz", "aguttes", "millon", "dorotheum", "ketterer",
+    "drouot", "bonhams", "phillips",
+]
+
 console = Console()
 
 
@@ -95,6 +105,17 @@ class WatchlistRow:
     flagged_at: datetime
     reviewed: bool
     notes: Optional[str]
+
+
+@dataclass
+class ScrapeHealthRow:
+    """Last scrape run summary for one platform."""
+    platform: str
+    last_run: Optional[datetime]
+    status_code: Optional[int]
+    items_found: int
+    error_message: Optional[str]
+    duration_ms: Optional[int]
 
 
 # Human-readable labels for each canonical trigger keyword
@@ -358,9 +379,81 @@ def _watchlist_section(watchlist_rows: list[WatchlistRow]) -> list:
     return renderables
 
 
+# ---------------------------------------------------------------------------
+# Scrape health section
+# ---------------------------------------------------------------------------
+
+def _scrape_health_table(health_rows: list["ScrapeHealthRow"]) -> Table:
+    """Render a table showing last-run status for every scraper."""
+    table = Table(
+        show_header=True,
+        header_style="bold white on grey23",
+        border_style="bright_black",
+        padding=(0, 1),
+        expand=True,
+    )
+    table.add_column("Platform", style="bold", min_width=16)
+    table.add_column("Last Run", min_width=19)
+    table.add_column("Status", min_width=8, justify="center")
+    table.add_column("Items", min_width=6, justify="right")
+    table.add_column("Duration", min_width=9, justify="right")
+    table.add_column("Error", style="dim red", min_width=30, no_wrap=False)
+
+    now = datetime.now(timezone.utc)
+    for row in health_rows:
+        if row.last_run is None:
+            run_str = "[dim]never[/dim]"
+            age_style = "dim"
+        else:
+            age = now - row.last_run
+            hrs = age.total_seconds() / 3600
+            run_str = row.last_run.strftime("%Y-%m-%d  %H:%M")
+            age_style = "green" if hrs < 7 else ("yellow" if hrs < 25 else "red")
+            run_str = f"[{age_style}]{run_str}[/{age_style}]"
+
+        if row.status_code is None:
+            status_str = "[dim]—[/dim]"
+        elif row.status_code == 200:
+            status_str = "[green]200 ✓[/green]"
+        else:
+            status_str = f"[red]{row.status_code}[/red]"
+
+        items_str = f"[cyan]{row.items_found}[/cyan]" if row.items_found else "[dim]0[/dim]"
+        dur_str = f"{row.duration_ms / 1000:.1f}s" if row.duration_ms else "[dim]—[/dim]"
+        err_str = (row.error_message or "")[:60]
+
+        table.add_row(
+            row.platform, run_str, status_str, items_str, dur_str, err_str,
+        )
+
+    return table
+
+
+def _scrape_health_section(health_rows: list["ScrapeHealthRow"]) -> list:
+    ok = sum(1 for r in health_rows if r.error_message is None and r.last_run)
+    errors = sum(1 for r in health_rows if r.error_message)
+    never = sum(1 for r in health_rows if r.last_run is None)
+    total_items = sum(r.items_found for r in health_rows)
+
+    summary = (
+        f"[green]{ok} OK[/green]  "
+        f"[red]{errors} errors[/red]  "
+        f"[dim]{never} never run[/dim]  ·  "
+        f"[cyan]{total_items:,} total items indexed[/cyan]"
+    )
+    return [
+        Text(""),
+        Rule("[bold bright_black]SCRAPE HEALTH[/bold bright_black]"),
+        Panel(summary, border_style="bright_black", padding=(0, 2)),
+        Text(""),
+        _scrape_health_table(health_rows),
+    ]
+
+
 def build_layout(
     rows: list[OpportunityRow],
     watchlist_rows: Optional[list[WatchlistRow]] = None,
+    health_rows: Optional[list["ScrapeHealthRow"]] = None,
     refresh_interval: Optional[int] = None,
 ) -> Group:
     """Assemble the full dashboard as a single renderable Group."""
@@ -403,6 +496,10 @@ def build_layout(
 
     # ── Section 2: Keyword Alerts ─────────────────────────────────────────────
     renderables.extend(_watchlist_section(watchlist_rows))
+
+    # ── Section 3: Scrape Health ──────────────────────────────────────────────
+    if health_rows is not None:
+        renderables.extend(_scrape_health_section(health_rows))
 
     return Group(*renderables)
 
@@ -839,6 +936,72 @@ def _demo_watchlist_rows() -> list[WatchlistRow]:
     ]
 
 
+def _load_scrape_health_from_db() -> list[ScrapeHealthRow]:
+    from sqlalchemy import select, func as sqlfunc
+    from artarb.database import get_session
+    from artarb.models.base import ScrapeLog
+
+    with get_session() as db:
+        # For each platform get the single most recent scrape_log row
+        latest_ids = (
+            db.execute(
+                select(sqlfunc.max(ScrapeLog.id).label("id"))
+                .group_by(ScrapeLog.platform)
+            ).scalars().all()
+        )
+        if not latest_ids:
+            by_platform: dict[str, ScrapeLog] = {}
+        else:
+            rows_db = db.execute(
+                select(ScrapeLog).where(ScrapeLog.id.in_(latest_ids))
+            ).scalars().all()
+            by_platform = {r.platform: r for r in rows_db}
+
+    output: list[ScrapeHealthRow] = []
+    for platform in ALL_PLATFORMS:
+        r = by_platform.get(platform)
+        output.append(ScrapeHealthRow(
+            platform=platform,
+            last_run=r.scraped_at if r else None,
+            status_code=r.http_status if r else None,
+            items_found=r.items_found if r else 0,
+            error_message=r.error_message if r else None,
+            duration_ms=r.duration_ms if r else None,
+        ))
+    return output
+
+
+def _demo_health_rows() -> list[ScrapeHealthRow]:
+    now = datetime.now(timezone.utc)
+    statuses = [
+        ("kunstveiling",  now - timedelta(hours=2),  200, 47,  None,             1_820),
+        ("catawiki",      now - timedelta(hours=2),  200, 120, None,             4_250),
+        ("barnebys",      now - timedelta(hours=2),  200, 83,  None,             2_100),
+        ("venduehuis",    now - timedelta(hours=3),  200, 31,  None,             980),
+        ("bernaerts",     now - timedelta(hours=3),  200, 18,  None,             760),
+        ("vavato",        now - timedelta(hours=3),  200, 55,  None,             1_400),
+        ("bassenge",      now - timedelta(hours=4),  200, 24,  None,             890),
+        ("van_ham",       now - timedelta(hours=4),  200, 36,  None,             1_100),
+        ("arenberg",      now - timedelta(hours=4),  404, 0,   "HTTP 404",       300),
+        ("piasa",         now - timedelta(hours=5),  200, 29,  None,             850),
+        ("lempertz",      now - timedelta(hours=5),  200, 41,  None,             1_230),
+        ("aguttes",       now - timedelta(hours=5),  200, 22,  None,             670),
+        ("millon",        now - timedelta(hours=6),  200, 19,  None,             590),
+        ("dorotheum",     now - timedelta(hours=6),  200, 38,  None,             2_900),
+        ("ketterer",      now - timedelta(hours=6),  200, 15,  None,             1_750),
+        ("drouot",        now - timedelta(hours=7),  200, 94,  None,             5_100),
+        ("bonhams",       now - timedelta(hours=8),  200, 67,  None,             3_400),
+        ("phillips",      None,                      None, 0,  None,             None),
+    ]
+    return [
+        ScrapeHealthRow(
+            platform=p, last_run=lr, status_code=sc,
+            items_found=items, error_message=err, duration_ms=dur,
+        )
+        for p, lr, sc, items, err, dur in statuses
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -856,28 +1019,29 @@ def main() -> None:
                         help="Only show opportunities with confidence >= F (e.g. 0.70).")
     args = parser.parse_args()
 
-    def load() -> tuple[list[OpportunityRow], list[WatchlistRow]]:
+    def load() -> tuple[list[OpportunityRow], list[WatchlistRow], list[ScrapeHealthRow]]:
         opp_rows = _demo_rows() if args.demo else _load_from_db()
         if args.min_conf > 0:
             opp_rows = [r for r in opp_rows if r.confidence_score >= args.min_conf]
         wl_rows = _demo_watchlist_rows() if args.demo else _load_watchlist_from_db()
-        return opp_rows, wl_rows
+        health = _demo_health_rows() if args.demo else _load_scrape_health_from_db()
+        return opp_rows, wl_rows, health
 
     if args.refresh:
-        opp, wl = load()
+        opp, wl, health = load()
         with Live(
-            build_layout(opp, wl, args.refresh),
+            build_layout(opp, wl, health, args.refresh),
             console=console,
             screen=True,
             refresh_per_second=2,
         ) as live:
             while True:
                 time.sleep(args.refresh)
-                opp, wl = load()
-                live.update(build_layout(opp, wl, args.refresh))
+                opp, wl, health = load()
+                live.update(build_layout(opp, wl, health, args.refresh))
     else:
-        opp, wl = load()
-        console.print(build_layout(opp, wl))
+        opp, wl, health = load()
+        console.print(build_layout(opp, wl, health))
 
 
 if __name__ == "__main__":

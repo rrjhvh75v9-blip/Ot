@@ -109,12 +109,9 @@ def job_rkd_import() -> None:
 
 def job_scrapers() -> None:
     """Run all auction scrapers sequentially."""
-    from artarb.scrapers.kunstveiling import scrape
-    _run_job("scraper:kunstveiling", scrape)
-
-    # Future scrapers: add _run_job calls here as new modules land.
-    # e.g. from artarb.scrapers.catawiki import scrape as catawiki_scrape
-    #      _run_job("scraper:catawiki", catawiki_scrape)
+    from artarb.scrapers import ALL_SCRAPERS
+    for name, scrape_fn in ALL_SCRAPERS:
+        _run_job(f"scraper:{name}", scrape_fn)
 
 
 def job_opportunity_detector() -> None:
