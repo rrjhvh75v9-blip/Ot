@@ -2,8 +2,14 @@
 """
 Art Arbitrage Terminal Dashboard.
 
-Displays specialty arbitrage opportunities grouped by niche, with
-colour-coded urgency based on auction end time.
+Two sections:
+
+  SPECIALTY OPPORTUNITIES   — open opportunities flagged by the specialty scorer,
+                              grouped by niche with colour-coded urgency.
+
+  KEYWORD ALERTS            — lots whose titles matched a watchlist keyword but
+  NEEDS REVIEW                whose artist is not yet in the database.  Grouped
+                              by trigger keyword for efficient batch review.
 
 Usage
 -----
@@ -73,6 +79,43 @@ class OpportunityRow:
     sell_price_estimate: Optional[float]
     median_hammer: Optional[float]
     arbitrage_category: Optional[str]
+
+
+@dataclass
+class WatchlistRow:
+    """Flattened view of a specialty_watchlist entry for the KEYWORD ALERTS section."""
+    watchlist_id: uuid.UUID
+    lot_title: str
+    artist_name: str
+    trigger_keyword: str
+    platform: Optional[str]
+    current_bid: Optional[float]
+    listing_url: Optional[str]
+    ends_at: Optional[datetime]
+    flagged_at: datetime
+    reviewed: bool
+    notes: Optional[str]
+
+
+# Human-readable labels for each canonical trigger keyword
+KEYWORD_LABELS: dict[str, str] = {
+    "tsuba":                "Tsuba (Japanese sword guard)",
+    "netsuke":              "Netsuke",
+    "okimono":              "Okimono",
+    "fuchi":                "Fuchi (sword fitting)",
+    "menuki":               "Menuki (sword grip ornament)",
+    "derriere_le_miroir":   "Derrière le Miroir",
+    "dlm":                  "DLM (Derrière le Miroir abbrev.)",
+    "maeght":               "Maeght (Paris gallery)",
+    "griffelkunst":         "Griffelkunst (German print edition)",
+    "mourlot":              "Mourlot (Paris print workshop)",
+    "atelier_stamp":        "Atelier Stamp",
+    "atelierstempel":       "Atelierstempel",
+    "estate_stamp":         "Estate Stamp",
+    "studio_pottery":       "Studio Pottery",
+    "stoneware":            "Stoneware (British ceramics)",
+    "studio_keramiek":      "Studio Keramiek",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +240,7 @@ def _stat_box(label: str, value: str, style: str = "white") -> Panel:
     )
 
 
-def _summary_row(rows: list[OpportunityRow]) -> Columns:
+def _summary_row(rows: list[OpportunityRow], n_alerts: int = 0) -> Columns:
     now = datetime.now(timezone.utc)
 
     n_urgent = sum(
@@ -208,18 +251,120 @@ def _summary_row(rows: list[OpportunityRow]) -> Columns:
     total_profit = sum(r.expected_profit for r in rows)
 
     return Columns([
-        _stat_box("Total specialty", str(len(rows)), "white"),
-        _stat_box("Ending < 24 h",  str(n_urgent),  "red"   if n_urgent else "dim"),
-        _stat_box("Avg confidence",  f"{avg_conf:.0%}", "green" if avg_conf >= 0.65 else "yellow"),
-        _stat_box("Expected profit", f"€{total_profit:,.0f}", "green"),
+        _stat_box("Specialty opps",  str(len(rows)),           "white"),
+        _stat_box("Ending < 24 h",   str(n_urgent),            "red"   if n_urgent  else "dim"),
+        _stat_box("Avg confidence",  f"{avg_conf:.0%}",        "green" if avg_conf >= 0.65 else "yellow"),
+        _stat_box("Expected profit", f"€{total_profit:,.0f}",  "green"),
+        _stat_box("Keyword alerts",  str(n_alerts),            "cyan"  if n_alerts  else "dim"),
     ], equal=True, expand=True)
+
+
+# ---------------------------------------------------------------------------
+# Watchlist rendering
+# ---------------------------------------------------------------------------
+
+def _watchlist_keyword_table(keyword: str, rows: list[WatchlistRow]) -> Table:
+    label = KEYWORD_LABELS.get(keyword, keyword.replace("_", " ").title())
+    count = len(rows)
+    noun = "lot" if count == 1 else "lots"
+
+    t = Table(
+        title=f"[bold]{label}[/bold]  ·  {count} unreviewed {noun}",
+        title_style="bold black on cyan",
+        border_style="cyan",
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
+    )
+    t.add_column("Urgency",       width=11,  no_wrap=True)
+    t.add_column("Lot Title",     min_width=30)
+    t.add_column("Artist",        min_width=20)
+    t.add_column("Platform\nBid", min_width=16)
+    t.add_column("Flagged",       min_width=12, no_wrap=True)
+    t.add_column("URL",           min_width=12)
+
+    for row in sorted(rows, key=lambda r: r.flagged_at, reverse=True):
+        urgency_label, urgency_style = _urgency(row.ends_at)
+
+        # Truncate long titles
+        title_str = row.lot_title if len(row.lot_title) <= 55 else row.lot_title[:54] + "…"
+        title_txt = Text(title_str, style="white")
+
+        artist_txt = Text(row.artist_name, style="bold dim")
+
+        bid_str = f"€{row.current_bid:,.0f}" if row.current_bid else "—"
+        platform_txt = Text()
+        platform_txt.append(row.platform or "?", style="magenta")
+        platform_txt.append(f"\n{bid_str}", style="white")
+
+        flagged_str = row.flagged_at.strftime("%m-%d %H:%M")
+
+        url_txt = Text()
+        if row.listing_url:
+            url_txt.append("↗ view lot", style=f"link {row.listing_url} blue underline")
+        else:
+            url_txt.append("—", style="dim")
+
+        t.add_row(
+            Text(urgency_label, style=urgency_style),
+            title_txt,
+            artist_txt,
+            platform_txt,
+            flagged_str,
+            url_txt,
+        )
+
+    return t
+
+
+def _watchlist_section(watchlist_rows: list[WatchlistRow]) -> list:
+    """Return a list of renderables for the KEYWORD ALERTS section."""
+    if not watchlist_rows:
+        return [
+            Rule("[bold cyan]KEYWORD ALERTS — NEEDS REVIEW[/bold cyan]"),
+            Panel("[dim]No unreviewed keyword alerts.[/dim]", border_style="dim cyan"),
+        ]
+
+    # Group by trigger_keyword
+    by_kw: dict[str, list[WatchlistRow]] = {}
+    for row in watchlist_rows:
+        by_kw.setdefault(row.trigger_keyword, []).append(row)
+
+    # Keyword order: by count descending, then alphabetical
+    ordered_kws = sorted(by_kw.keys(), key=lambda k: (-len(by_kw[k]), k))
+
+    # Build a compact keyword summary line
+    summary_parts = [
+        f"{KEYWORD_LABELS.get(k, k)} ({len(by_kw[k])})"
+        for k in ordered_kws
+    ]
+    summary_txt = "  ·  ".join(summary_parts)
+
+    renderables: list = [
+        Text(""),
+        Rule("[bold cyan]KEYWORD ALERTS — NEEDS REVIEW[/bold cyan]"),
+        Panel(
+            f"[cyan]{len(watchlist_rows)} unreviewed lot(s) across "
+            f"{len(by_kw)} keyword(s)[/cyan]\n[dim]{summary_txt}[/dim]",
+            border_style="cyan",
+            padding=(0, 2),
+        ),
+    ]
+
+    for kw in ordered_kws:
+        renderables.append(Text(""))
+        renderables.append(_watchlist_keyword_table(kw, by_kw[kw]))
+
+    return renderables
 
 
 def build_layout(
     rows: list[OpportunityRow],
+    watchlist_rows: Optional[list[WatchlistRow]] = None,
     refresh_interval: Optional[int] = None,
 ) -> Group:
     """Assemble the full dashboard as a single renderable Group."""
+    watchlist_rows = watchlist_rows or []
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d  %H:%M UTC")
     subtitle = f"[dim]{now_str}"
     if refresh_interval:
@@ -232,28 +377,32 @@ def build_layout(
         padding=(0, 2),
     )
 
+    renderables: list = [header, _summary_row(rows, n_alerts=len(watchlist_rows))]
+
+    # ── Section 1: Specialty Opportunities ───────────────────────────────────
+    renderables.append(Rule("[bold blue]SPECIALTY OPPORTUNITIES[/bold blue]"))
+
     if not rows:
-        empty = Panel(
+        renderables.append(Panel(
             "[yellow]No specialty opportunities found.[/yellow]\n"
             "Run the scraper + opportunity detector first, or pass --demo.",
             border_style="yellow",
-        )
-        return Group(header, empty)
+        ))
+    else:
+        by_cat: dict[str, list[OpportunityRow]] = {}
+        for row in rows:
+            k = row.specialty_category or "unknown"
+            by_cat.setdefault(k, []).append(row)
 
-    renderables = [header, _summary_row(rows), Rule("[bold blue]SPECIALTY OPPORTUNITIES[/bold blue]")]
+        ordered = [k for k in CATEGORY_ORDER if k in by_cat]
+        ordered += [k for k in by_cat if k not in ordered]
 
-    # Group rows by specialty_category in canonical order
-    by_cat: dict[str, list[OpportunityRow]] = {}
-    for row in rows:
-        k = row.specialty_category or "unknown"
-        by_cat.setdefault(k, []).append(row)
+        for cat in ordered:
+            renderables.append(Text(""))
+            renderables.append(_category_table(cat, by_cat[cat]))
 
-    ordered = [k for k in CATEGORY_ORDER if k in by_cat]
-    ordered += [k for k in by_cat if k not in ordered]
-
-    for cat in ordered:
-        renderables.append(Text(""))  # blank line between tables
-        renderables.append(_category_table(cat, by_cat[cat]))
+    # ── Section 2: Keyword Alerts ─────────────────────────────────────────────
+    renderables.extend(_watchlist_section(watchlist_rows))
 
     return Group(*renderables)
 
@@ -320,6 +469,56 @@ def _load_from_db() -> list[OpportunityRow]:
                     if idx and idx.median_hammer else None
                 ),
                 arbitrage_category=r.Opportunity.arbitrage_category,
+            ))
+        return output
+
+
+def _load_watchlist_from_db() -> list[WatchlistRow]:
+    from sqlalchemy import select
+
+    from artarb.database import get_session
+    from artarb.models.base import Artist, Listing, Lot, SpecialtyWatchlist
+
+    with get_session() as db:
+        # Join watchlist → lot → artist; LEFT JOIN to latest active listing
+        rows = db.execute(
+            select(SpecialtyWatchlist, Lot, Artist)
+            .join(Lot, SpecialtyWatchlist.lot_id == Lot.id)
+            .join(Artist, Lot.artist_id == Artist.id)
+            .where(SpecialtyWatchlist.reviewed.is_(False))
+            .order_by(SpecialtyWatchlist.flagged_at.desc())
+            .limit(300)
+        ).all()
+
+        # Collect lot IDs to bulk-load the most recent active listing per lot
+        lot_ids = list({r.Lot.id for r in rows})
+        best_listing: dict[uuid.UUID, Listing] = {}
+        if lot_ids:
+            for lst in db.execute(
+                select(Listing)
+                .where(
+                    Listing.lot_id.in_(lot_ids),
+                    Listing.status.in_(["active", "live", "open"]),
+                )
+                .order_by(Listing.discovered_at.desc())
+            ).scalars():
+                best_listing.setdefault(lst.lot_id, lst)
+
+        output: list[WatchlistRow] = []
+        for r in rows:
+            lst = best_listing.get(r.Lot.id)
+            output.append(WatchlistRow(
+                watchlist_id=r.SpecialtyWatchlist.id,
+                lot_title=r.Lot.title or "(no title)",
+                artist_name=r.Artist.name_canonical,
+                trigger_keyword=r.SpecialtyWatchlist.trigger_keyword,
+                platform=lst.platform if lst else None,
+                current_bid=float(lst.current_bid) if lst and lst.current_bid else None,
+                listing_url=(lst.listing_url or r.Lot.source_url) if lst else r.Lot.source_url,
+                ends_at=lst.ends_at if lst else None,
+                flagged_at=r.SpecialtyWatchlist.flagged_at,
+                reviewed=r.SpecialtyWatchlist.reviewed,
+                notes=r.SpecialtyWatchlist.notes,
             ))
         return output
 
@@ -510,6 +709,136 @@ def _demo_rows() -> list[OpportunityRow]:
     ]
 
 
+def _demo_watchlist_rows() -> list[WatchlistRow]:
+    now = datetime.now(timezone.utc)
+    return [
+        # ── Netsuke ──────────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Netsuke ivory rabbit figure, Meiji period, signed",
+            artist_name="Unknown",
+            trigger_keyword="netsuke",
+            platform="catawiki",
+            current_bid=350.0,
+            listing_url="https://www.catawiki.com/en/l/22334455",
+            ends_at=now + timedelta(hours=6),
+            flagged_at=now - timedelta(hours=2),
+            reviewed=False,
+            notes=None,
+        ),
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Fine netsuke: seated monkey, boxwood, Edo period",
+            artist_name="Unknown",
+            trigger_keyword="netsuke",
+            platform="barnebys",
+            current_bid=None,
+            listing_url="https://www.barnebys.com/buy/lot/11223344",
+            ends_at=now + timedelta(days=3),
+            flagged_at=now - timedelta(hours=5),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Tsuba ────────────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Antique Japanese tsuba, iron nanako, Edo, attributed Myochin school",
+            artist_name="Unknown",
+            trigger_keyword="tsuba",
+            platform="kunstveiling",
+            current_bid=120.0,
+            listing_url="https://www.kunstveiling.nl/lot/55667788",
+            ends_at=now + timedelta(hours=19),
+            flagged_at=now - timedelta(hours=1),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Derrière le Miroir ───────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Derrière le Miroir No. 125, Giacometti original lithograph",
+            artist_name="Unknown",
+            trigger_keyword="derriere_le_miroir",
+            platform="catawiki",
+            current_bid=280.0,
+            listing_url="https://www.catawiki.com/en/l/77889900",
+            ends_at=now + timedelta(hours=44),
+            flagged_at=now - timedelta(hours=3),
+            reviewed=False,
+            notes=None,
+        ),
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="DLM no. 98, Miro colour lithograph on Arches paper",
+            artist_name="Unknown",
+            trigger_keyword="dlm",
+            platform="kunstveiling",
+            current_bid=180.0,
+            listing_url="https://www.kunstveiling.nl/lot/44556677",
+            ends_at=now + timedelta(days=2),
+            flagged_at=now - timedelta(hours=8),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Griffelkunst ─────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Griffelkunst Jahresmappe 1978, portfolio with 5 signed prints",
+            artist_name="Unknown",
+            trigger_keyword="griffelkunst",
+            platform="kunstveiling",
+            current_bid=45.0,
+            listing_url="https://www.kunstveiling.nl/lot/33445566",
+            ends_at=now + timedelta(days=6),
+            flagged_at=now - timedelta(hours=12),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Mourlot ──────────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Chagall, Mourlot atelier original lithograph 'Les Amoureux', 1963",
+            artist_name="Unknown",
+            trigger_keyword="mourlot",
+            platform="catawiki",
+            current_bid=1_200.0,
+            listing_url="https://www.catawiki.com/en/l/99001122",
+            ends_at=now + timedelta(hours=10),
+            flagged_at=now - timedelta(hours=4),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Estate Stamp ─────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Oil on canvas, landscape, estate stamp verso, Dutch school c.1920",
+            artist_name="Unknown / Onbekend",
+            trigger_keyword="estate_stamp",
+            platform="kunstveiling",
+            current_bid=90.0,
+            listing_url="https://www.kunstveiling.nl/lot/22334455",
+            ends_at=now + timedelta(days=4),
+            flagged_at=now - timedelta(hours=6),
+            reviewed=False,
+            notes=None,
+        ),
+        # ── Stoneware ────────────────────────────────────────────────────────
+        WatchlistRow(
+            watchlist_id=uuid.uuid4(),
+            lot_title="Stoneware vessel, impressed mark, mid-century British studio pottery",
+            artist_name="Unknown",
+            trigger_keyword="stoneware",
+            platform="barnebys",
+            current_bid=65.0,
+            listing_url="https://www.barnebys.com/buy/lot/99887766",
+            ends_at=now + timedelta(days=5),
+            flagged_at=now - timedelta(hours=9),
+            reviewed=False,
+            notes=None,
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -527,24 +856,28 @@ def main() -> None:
                         help="Only show opportunities with confidence >= F (e.g. 0.70).")
     args = parser.parse_args()
 
-    def load() -> list[OpportunityRow]:
-        rows = _demo_rows() if args.demo else _load_from_db()
+    def load() -> tuple[list[OpportunityRow], list[WatchlistRow]]:
+        opp_rows = _demo_rows() if args.demo else _load_from_db()
         if args.min_conf > 0:
-            rows = [r for r in rows if r.confidence_score >= args.min_conf]
-        return rows
+            opp_rows = [r for r in opp_rows if r.confidence_score >= args.min_conf]
+        wl_rows = _demo_watchlist_rows() if args.demo else _load_watchlist_from_db()
+        return opp_rows, wl_rows
 
     if args.refresh:
+        opp, wl = load()
         with Live(
-            build_layout(load(), args.refresh),
+            build_layout(opp, wl, args.refresh),
             console=console,
             screen=True,
             refresh_per_second=2,
         ) as live:
             while True:
                 time.sleep(args.refresh)
-                live.update(build_layout(load(), args.refresh))
+                opp, wl = load()
+                live.update(build_layout(opp, wl, args.refresh))
     else:
-        console.print(build_layout(load()))
+        opp, wl = load()
+        console.print(build_layout(opp, wl))
 
 
 if __name__ == "__main__":

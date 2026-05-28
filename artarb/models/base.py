@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Index,
-    Integer, Numeric, SmallInteger, String, Text, func,
+    Integer, Numeric, SmallInteger, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -64,6 +64,7 @@ class Lot(Base):
     price_events: Mapped[list["PriceEvent"]] = relationship(back_populates="lot")
     listings: Mapped[list["Listing"]] = relationship(back_populates="lot")
     portfolio_entries: Mapped[list["Portfolio"]] = relationship(back_populates="lot")
+    watchlist_flags: Mapped[list["SpecialtyWatchlist"]] = relationship(back_populates="lot")
 
 
 class PriceEvent(Base):
@@ -238,3 +239,21 @@ class ScrapeLog(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
     scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SpecialtyWatchlist(Base):
+    __tablename__ = "specialty_watchlist"
+    __table_args__ = (
+        Index("ix_specialty_watchlist_lot_id", "lot_id"),
+        Index("ix_specialty_watchlist_flagged_at", "flagged_at"),
+        UniqueConstraint("lot_id", "trigger_keyword", name="uq_watchlist_lot_keyword"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    lot_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("lots.id"))
+    trigger_keyword: Mapped[str] = mapped_column(String(200))
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    flagged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    lot: Mapped["Lot"] = relationship(back_populates="watchlist_flags")
