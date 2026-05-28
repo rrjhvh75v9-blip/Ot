@@ -47,6 +47,7 @@ from artarb.database import get_session
 from artarb.models.base import (
     Artist, Listing, Lot, MarketEvent, Opportunity, RegionalPriceIndex,
 )
+from artarb.arbitrage import specialty_scorer
 
 log = logging.getLogger(__name__)
 
@@ -170,13 +171,21 @@ def _process_one(
 
     # 4. Confidence score
     has_obituary = _recent_obituary(db, artist.id)
-    score, factors = _confidence_score(listing, lot, idx, has_obituary)
+    base_score, factors = _confidence_score(listing, lot, idx, has_obituary)
+
+    # 4b. Specialty bonus
+    specialty_bonus, specialty_factors, arbitrage_category = specialty_scorer.score(
+        listing, lot, artist, bid
+    )
+    score = round(base_score + specialty_bonus, 4)
+    factors.update(specialty_factors)
 
     log.debug(
         "  listing %s  artist=%r  bid=%.0f  buy=%.0f  sell=%.0f  "
-        "profit=%.0f  conf=%.2f",
+        "profit=%.0f  conf=%.2f (base=%.2f specialty=%.2f)",
         listing.id, artist.name_canonical,
-        float(bid), buy_cost, sell_estimate, expected_profit, score,
+        float(bid), buy_cost, sell_estimate, expected_profit,
+        score, base_score, specialty_bonus,
     )
 
     # 5. Gate
@@ -191,10 +200,12 @@ def _process_one(
     # 6. Upsert
     rationale = _build_rationale(
         bid, buy_cost, sell_estimate, expected_profit, score, factors, idx,
+        base_score, specialty_bonus,
     )
     action = _upsert_opportunity(
         db, listing, lot, artist, idx,
         buy_cost, sell_estimate, expected_profit, score, rationale,
+        arbitrage_category,
     )
 
     if action == "created":
@@ -349,6 +360,7 @@ def _upsert_opportunity(
     expected_profit: float,
     confidence_score: float,
     rationale: dict,
+    arbitrage_category: Optional[str] = None,
 ) -> str:
     """Insert or update an Opportunity.  Returns 'created', 'updated', or 'unchanged'."""
     existing = db.execute(
@@ -367,6 +379,7 @@ def _upsert_opportunity(
         confidence_score=confidence_score,
         rationale=rationale,
         status="open",
+        arbitrage_category=arbitrage_category,
     )
 
     if existing is None:
@@ -378,8 +391,10 @@ def _upsert_opportunity(
         ))
         return "created"
 
-    # Update only if financials shifted materially (> €1 difference)
-    if abs(float(existing.expected_profit or 0) - expected_profit) > 1.0:
+    # Update if financials shifted materially (> €1) or arbitrage_category changed
+    profit_shifted = abs(float(existing.expected_profit or 0) - expected_profit) > 1.0
+    category_changed = existing.arbitrage_category != arbitrage_category
+    if profit_shifted or category_changed:
         for k, v in new_values.items():
             setattr(existing, k, v)
         return "updated"
@@ -412,6 +427,8 @@ def _build_rationale(
     confidence_score: float,
     factors: dict,
     idx: RegionalPriceIndex,
+    base_score: float = 0.0,
+    specialty_bonus: float = 0.0,
 ) -> dict:
     return {
         "bid": bid,
@@ -419,6 +436,8 @@ def _build_rationale(
         "sell_estimate": sell_estimate,
         "expected_profit": expected_profit,
         "confidence_score": confidence_score,
+        "base_score": base_score,
+        "specialty_bonus": specialty_bonus,
         "confidence_factors": factors,
         "price_index": {
             "id": str(idx.id),

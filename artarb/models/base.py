@@ -193,6 +193,7 @@ class Opportunity(Base):
     confidence_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 4))
     rationale: Mapped[Optional[dict]] = mapped_column(JSONB)
     status: Mapped[Optional[str]] = mapped_column(String(50))
+    arbitrage_category: Mapped[Optional[str]] = mapped_column(String(500))
     actual_buy_price: Mapped[Optional[float]] = mapped_column(Numeric(14, 2))
     actual_sell_price: Mapped[Optional[float]] = mapped_column(Numeric(14, 2))
     actual_profit: Mapped[Optional[float]] = mapped_column(Numeric(14, 2))
