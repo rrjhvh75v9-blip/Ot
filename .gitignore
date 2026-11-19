@@ -9,3 +9,6 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+
+# GDPR Damages Atlas: ruwe teksten blijven lokaal
+data/
